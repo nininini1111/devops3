@@ -46,8 +46,8 @@ jobs:
             exit 1
           fi
 
-      # 3. Поднятие целевого контейнера PostgreSQL
-      - name: Start Target PostgreSQL
+      # 3. Поднятие целевого контейнера PostgreSQL и инициализация схемы
+      - name: Start Target PostgreSQL & Init Schema
         if: steps.check_status.outputs.already_migrated == 'false'
         shell: bash
         env:
@@ -56,20 +56,26 @@ jobs:
           docker compose -f "$COMPOSE_FILE" up -d db-postgres
           echo "⏳ Waiting for PostgreSQL to initialize..."
           sleep 10
+          docker run -d --name mm95-init --network=mattermost_network \
+            -e MM_SQLSETTINGS_DRIVERNAME=postgres \
+            -e MM_SQLSETTINGS_DATASOURCE="postgres://postgres:${DB_POSTGRES_PASSWORD}@mattermost-postgres:5432/mattermost?sslmode=disable" \
+            mattermost/mattermost-team-edition:9.5
+          sleep 15
+          docker stop mm95-init && docker rm mm95-init
+          docker exec mattermost-postgres psql -U postgres -d mattermost -c 'DO $body$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = $$public$$ AND tablename != $$db_migrations$$) LOOP EXECUTE $$TRUNCATE TABLE $$ || quote_ident(r.tablename) || $$ CASCADE$$; END LOOP; END $body$;'
+          docker exec mattermost-postgres psql -U postgres -d mattermost -c "ALTER SCHEMA public RENAME TO mattermost;"
 
       # 4. Гетерогенная миграция данных с помощью pgloader
-      - name: Run pgloader (With Schema Drop for Idempotency)
+      - name: Run pgloader (With Downcase Identifiers)
         if: steps.check_status.outputs.already_migrated == 'false'
         shell: bash
-        env:
-          MYSQL_PASS: ${{ secrets.DB_MYSQL_ROOT_PASSWORD }}
-          PG_PASS: ${{ secrets.DB_POSTGRES_PASSWORD }}
         run: |
-          echo "🔄 Migrating schema and data from MySQL to PostgreSQL..."
-          MSYS_NO_PATHCONV=1 docker run --rm --network=mattermost_network mattermost/mattermost-pgloader:latest pgloader \
-            --with "include drop" \
-            "mysql://root:${MYSQL_PASS}@mattermost-mysql/mattermost" \
-            "postgresql://postgres:${PG_PASS}@mattermost-postgres/mattermost"
+          echo "🔄 Migrating data from MySQL to PostgreSQL..."
+          MSYS_NO_PATHCONV=1 docker run --rm --network=mattermost_network \
+            -v "$(pwd)/migrate.load:/migrate.load" \
+            mattermost/mattermost-pgloader:latest pgloader /migrate.load
+          docker exec mattermost-postgres psql -U postgres -d mattermost -c "ALTER SCHEMA mattermost RENAME TO public;"
+
 
       # 5. Установка маркерного флаг-файла успешной миграции
       - name: Mark Migration as Completed

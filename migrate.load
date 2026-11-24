@@ -1,0 +1,10 @@
+LOAD DATABASE
+     FROM mysql://root:StrongRootPass123@mattermost-mysql/mattermost
+     INTO postgresql://postgres:StrongPgPass123@mattermost-postgres/mattermost
+
+ WITH data only,
+      reset sequences,
+      downcase identifiers
+
+ EXCLUDING TABLE NAMES MATCHING 'db_migrations'
+;
